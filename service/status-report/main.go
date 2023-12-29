@@ -18,8 +18,8 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"os"
-	"strings"
 	"time"
 
 	"github.com/red-hat-storage/ocs-client-operator/api/v1alpha1"
@@ -27,7 +27,6 @@ import (
 	"github.com/red-hat-storage/ocs-client-operator/pkg/utils"
 
 	configv1 "github.com/openshift/api/config/v1"
-	opv1a1 "github.com/operator-framework/api/pkg/operators/v1alpha1"
 	providerclient "github.com/red-hat-storage/ocs-operator/v4/services/provider/client"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
@@ -37,10 +36,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client/config"
 )
 
-const (
-	csvPrefix = "ocs-client-operator"
-)
-
+// TODO: refactor main as the responsibilities grew significantly
 func main() {
 	scheme := runtime.NewScheme()
 	if err := v1alpha1.AddToScheme(scheme); err != nil {
@@ -49,10 +45,6 @@ func main() {
 
 	if err := clientgoscheme.AddToScheme(scheme); err != nil {
 		klog.Exitf("Failed to add client-go to scheme: %v", err)
-	}
-
-	if err := opv1a1.AddToScheme(scheme); err != nil {
-		klog.Exitf("Failed to add opv1a1 to scheme: %v", err)
 	}
 
 	if err := configv1.AddToScheme(scheme); err != nil {
@@ -92,37 +84,9 @@ func main() {
 		klog.Exitf("Failed to get storageClient %q/%q: %v", storageClient.Namespace, storageClient.Name, err)
 	}
 
-	var oprVersion string
-	csvList := opv1a1.ClusterServiceVersionList{}
-	if err = cl.List(ctx, &csvList, client.InNamespace(storageClientNamespace)); err != nil {
-		klog.Warningf("Failed to list csv resources: %v", err)
-	} else {
-		item := utils.Find(csvList.Items, func(csv *opv1a1.ClusterServiceVersion) bool {
-			return strings.HasPrefix(csv.Name, csvPrefix)
-		})
-		if item != nil {
-			oprVersion = item.Spec.Version.String()
-		}
-	}
-	if oprVersion == "" {
-		klog.Warningf("Unable to find csv with prefix %q", csvPrefix)
-	}
-
-	var pltVersion string
-	clusterVersion := &configv1.ClusterVersion{}
-	clusterVersion.Name = "version"
-	if err = cl.Get(ctx, types.NamespacedName{Name: clusterVersion.Name}, clusterVersion); err != nil {
-		klog.Warningf("Failed to get clusterVersion: %v", err)
-	} else {
-		item := utils.Find(clusterVersion.Status.History, func(record *configv1.UpdateHistory) bool {
-			return record.State == configv1.CompletedUpdate
-		})
-		if item != nil {
-			pltVersion = item.Version
-		}
-	}
-	if pltVersion == "" {
-		klog.Warningf("Unable to find ocp version with completed update")
+	platformVersion, isSet := os.LookupEnv(utils.PlatformVersionEnvVar)
+	if !isSet {
+		klog.Warningf("%s env var not set", utils.PlatformVersionEnvVar)
 	}
 
 	providerClient, err := providerclient.NewProviderClient(
@@ -136,10 +100,26 @@ func main() {
 	defer providerClient.Close()
 
 	status := providerclient.NewStorageClientStatus().
-		SetPlatformVersion(pltVersion).
-		SetOperatorVersion(oprVersion)
-	if _, err = providerClient.ReportStatus(ctx, storageClient.Status.ConsumerID, status); err != nil {
+		SetPlatformVersion(platformVersion).
+		SetOperatorVersion(storageClient.Status.Operator.CurrentVersion)
+	if _, err := providerClient.ReportStatus(ctx, storageClient.Status.ConsumerID, status); err != nil {
 		klog.Exitf("Failed to report status of storageClient %v: %v", storageClient.Status.ConsumerID, err)
+	}
+
+	// TODO (lgangava): this will be the response of ReportStatus and when the proto is updated this line will be removed
+	desiredVersion := os.Getenv("Version")
+	if desiredVersion == "" {
+		desiredVersion = storageClient.Status.Operator.CurrentVersion
+	}
+
+	storageClient.Status = v1alpha1.StorageClientStatus{
+		Operator: v1alpha1.OperatorVersion{
+			DesiredVersion: desiredVersion,
+		},
+	}
+	jsonPatch, _ := json.Marshal(storageClient)
+	if err = cl.Status().Patch(ctx, storageClient, client.RawPatch(types.MergePatchType, jsonPatch)); err != nil {
+		klog.Warningf("Failed to patch storageclient %q desired operator version: %v", storageClient.Name, desiredVersion)
 	}
 
 	var csiClusterConfigEntry = new(csi.ClusterConfigEntry)

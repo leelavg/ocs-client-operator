@@ -226,6 +226,14 @@ spec:
           - list
           - watch
         - apiGroups:
+          - operators.coreos.com
+          resources:
+          - subscriptions
+          verbs:
+          - get
+          - list
+          - patch
+        - apiGroups:
           - security.openshift.io
           resources:
           - securitycontextconstraints
@@ -600,6 +608,12 @@ spec:
           - get
           - list
         - apiGroups:
+          - ocs.openshift.io
+          resources:
+          - storageclients/status
+          verbs:
+          - patch
+        - apiGroups:
           - ""
           resources:
           - configmaps
@@ -607,14 +621,6 @@ spec:
           - get
           - list
           - update
-        - apiGroups:
-          - config.openshift.io
-          resources:
-          - clusterversions
-          verbs:
-          - get
-          - list
-          - watch
         serviceAccountName: ocs-client-operator-status-reporter
       deployments:
       - label:
@@ -687,7 +693,8 @@ spec:
           selector:
             matchLabels:
               control-plane: controller-manager
-          strategy: {}
+          strategy:
+            type: Recreate
           template:
             metadata:
               annotations:
@@ -902,16 +909,6 @@ spec:
           verbs:
           - create
         serviceAccountName: ocs-client-operator-csi-rbd-provisioner-sa
-      - rules:
-        - apiGroups:
-          - operators.coreos.com
-          resources:
-          - clusterserviceversions
-          verbs:
-          - get
-          - list
-          - watch
-        serviceAccountName: ocs-client-operator-status-reporter
     strategy: deployment
   installModes:
   - supported: true

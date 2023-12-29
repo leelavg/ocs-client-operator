@@ -32,6 +32,8 @@ import (
 	consolev1alpha1 "github.com/openshift/api/console/v1alpha1"
 	secv1 "github.com/openshift/api/security/v1"
 	opv1a1 "github.com/operator-framework/api/pkg/operators/v1alpha1"
+	operatorv2 "github.com/operator-framework/api/pkg/operators/v2"
+	"github.com/operator-framework/operator-lib/conditions"
 	monitoringv1 "github.com/prometheus-operator/prometheus-operator/pkg/apis/monitoring/v1"
 	appsv1 "k8s.io/api/apps/v1"
 	"k8s.io/apimachinery/pkg/runtime"
@@ -119,10 +121,24 @@ func main() {
 		os.Exit(1)
 	}
 
+	operatorVersion, err := controllers.GetOperatorVersion(context.TODO(), apiClient, utils.GetOperatorNamespace())
+	if err != nil {
+		setupLog.Error(err, "unable to find operator version")
+		os.Exit(1)
+	}
+
+	platformVersion, err := controllers.GetPlatformVersion(context.TODO(), apiClient)
+	if err != nil {
+		setupLog.Error(err, "unable to find platform verison")
+		os.Exit(1)
+	}
+
 	if err = (&controllers.StorageClientReconciler{
 		Client:            mgr.GetClient(),
 		Scheme:            mgr.GetScheme(),
 		OperatorNamespace: utils.GetOperatorNamespace(),
+		OperatorVersion:   operatorVersion,
+		PlatformVersion:   platformVersion,
 	}).SetupWithManager(mgr); err != nil {
 		setupLog.Error(err, "unable to create controller", "controller", "StorageClient")
 		os.Exit(1)
@@ -160,6 +176,24 @@ func main() {
 		ConsolePort:        int32(consolePort),
 	}).SetupWithManager(mgr); err != nil {
 		setupLog.Error(err, "unable to create controller", "controller", "ClusterVersionReconciler")
+		os.Exit(1)
+	}
+
+	condition, err := conditions.
+		InClusterFactory{Client: mgr.GetClient()}.
+		NewCondition(operatorv2.ConditionType(operatorv2.Upgradeable))
+	if err != nil {
+		setupLog.Error(err, "unable to create new upgradeable operator condition")
+		os.Exit(1)
+	}
+	if err = (&controllers.UpgradeReconciler{
+		Client:            mgr.GetClient(),
+		Scheme:            mgr.GetScheme(),
+		OperatorNamespace: utils.GetOperatorNamespace(),
+		OperatorCondition: condition,
+		PlatformVersion:   platformVersion,
+	}).SetupWithManager(mgr); err != nil {
+		setupLog.Error(err, "unable to create controller", "controller", "UpgradeController")
 		os.Exit(1)
 	}
 
