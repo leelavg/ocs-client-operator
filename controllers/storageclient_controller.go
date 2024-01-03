@@ -441,21 +441,21 @@ func (s *StorageClientReconciler) delete(obj client.Object) error {
 
 func (s *StorageClientReconciler) reconcileClientStatus(instance *v1alpha1.StorageClient) (reconcile.Result, error) {
 	currentVersion := instance.Status.Operator.CurrentVersion
+	operatorVersion, _ := semver.Make(s.OperatorVersion)
 	if currentVersion == "" {
 		// TODO(lgangava): should we set Major.Minor.Patch or Major.Minor only
-		instance.Status.Operator.CurrentVersion = s.OperatorVersion
+		instance.Status.Operator.CurrentVersion = fmt.Sprintf("%d.%d", operatorVersion.Major, operatorVersion.Minor)
 		return reconcile.Result{}, nil
 	}
 
 	instanceVersion, _ := semver.Make(currentVersion)
-	operatorVersion, _ := semver.Make(s.OperatorVersion)
 	// operator can be backward compatible to it's operand but it couldn't reconcile the object
 	// which was initially reconciled by higher versioned operator
 	if operatorVersion.Major < instanceVersion.Major || operatorVersion.Minor < instanceVersion.Minor {
 		return reconcile.Result{}, fmt.Errorf("backing off from reconciling StorageClient at higher version %q", currentVersion)
 	}
 
-	instance.Status.Operator.CurrentVersion = s.OperatorVersion
+	instance.Status.Operator.CurrentVersion = fmt.Sprintf("%d.%d", operatorVersion.Major, operatorVersion.Minor)
 	return reconcile.Result{}, nil
 }
 

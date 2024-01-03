@@ -40,14 +40,17 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/handler"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 	"sigs.k8s.io/controller-runtime/pkg/predicate"
-	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 )
 
 const (
 	ocsClientOperatorSubscriptionPackageName = "ocs-client-operator"
-	subscriptionChannelNamePrefix            = "stable-"
-	controllerName                           = "upgrade"
-	upgradeConditionReason                   = "ConstraintsSatisfied"
+	// TODO(lgangava): there can be "eus" or "fast" or "canditate" supported channels
+	// 	and custom channels also might exist, either get this data as part of a configmap
+	// 	or cut the name by '-'
+	subscriptionChannelNamePrefix = "stable-"
+	controllerName                = "upgrade"
+	upgradeConditionReason        = "ConstraintsSatisfied"
+	dummyPatchVersion             = ".99"
 )
 
 type UpgradeReconciler struct {
@@ -62,17 +65,6 @@ type UpgradeReconciler struct {
 }
 
 func (r *UpgradeReconciler) SetupWithManager(mgr ctrl.Manager) error {
-	enqueueNamespace := handler.EnqueueRequestsFromMapFunc(
-		func(_ context.Context, _ client.Object) []reconcile.Request {
-			return []reconcile.Request{
-				{
-					NamespacedName: types.NamespacedName{
-						Namespace: r.OperatorNamespace,
-					},
-				},
-			}
-		},
-	)
 	storageClientOperatorVersionPredicate := predicate.Funcs{
 		UpdateFunc: func(e event.UpdateEvent) bool {
 			if e.ObjectOld == nil || e.ObjectNew == nil {
@@ -85,9 +77,7 @@ func (r *UpgradeReconciler) SetupWithManager(mgr ctrl.Manager) error {
 				return false
 			}
 
-			currentVersion, _ := semver.Make(newObj.Status.Operator.CurrentVersion)
-			desiredVersion, _ := semver.Make(newObj.Status.Operator.DesiredVersion)
-			if currentVersion.Major != desiredVersion.Major || currentVersion.Minor != desiredVersion.Minor {
+			if newObj.Status.Operator.CurrentVersion != newObj.Status.Operator.DesiredVersion {
 				return true
 			}
 
@@ -115,8 +105,8 @@ func (r *UpgradeReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	}
 	return ctrl.NewControllerManagedBy(mgr).
 		Named(controllerName).
-		Watches(&v1alpha1.StorageClient{}, enqueueNamespace, builder.WithPredicates(storageClientOperatorVersionPredicate)).
-		Watches(&opv1a1.Subscription{}, enqueueNamespace, builder.WithPredicates(ocsClientOperatorSubscriptionPredicate)).
+		Watches(&v1alpha1.StorageClient{}, &handler.EnqueueRequestForObject{}, builder.WithPredicates(storageClientOperatorVersionPredicate)).
+		Watches(&opv1a1.Subscription{}, &handler.EnqueueRequestForObject{}, builder.WithPredicates(ocsClientOperatorSubscriptionPredicate)).
 		Complete(r)
 }
 
@@ -134,7 +124,7 @@ func (r *UpgradeReconciler) Reconcile(ctx context.Context, _ ctrl.Request) (ctrl
 		// TODO (lgangava): we are being very restrictive as of now, not upgrading if we hit any error
 		// differentiate between reconciler errors and not upgradeable errors
 		conditionStatus = metav1.ConditionFalse
-		conditionMessage = fmt.Sprintf("Operator couldn't be upgraded due to: %v", err)
+		conditionMessage = fmt.Sprintf("Operator could not be upgraded due to: %v", err)
 		r.log.Error(err, "an error occured during reconcilePhases")
 	}
 	err = errors.Join(err, r.setOperatorCondition(conditionStatus, conditionMessage))
@@ -164,17 +154,14 @@ func (r *UpgradeReconciler) reconcileSubscriptionChannel() error {
 	desiredVersions := make([]string, 0, len(storageClientList.Items))
 	for idx := range storageClientList.Items {
 		desiredVersion := storageClientList.Items[idx].Status.Operator.DesiredVersion
-		if desiredVersion != "" {
-			desiredVersions = append(desiredVersions, desiredVersion)
-		}
-	}
-	if len(storageClientList.Items) != len(desiredVersions) {
-		return fmt.Errorf("not all StorageClients status has operator desiredVersion set")
+		// usually these versions will not have patch version, so we are adding an arbitrary num for semver comparision
+		desiredVersion += dummyPatchVersion
+		desiredVersions = append(desiredVersions, desiredVersion)
 	}
 
 	desiredVersion, err := getOldestVersion(desiredVersions)
 	if err != nil {
-		return fmt.Errorf("unable to find oldest desiredVersion that operator should be in")
+		return fmt.Errorf("unable to find oldest desiredVersion that operator should be in: %v", err)
 	}
 
 	subscriptionList := &opv1a1.SubscriptionList{}
@@ -200,29 +187,40 @@ func (r *UpgradeReconciler) reconcileSubscriptionChannel() error {
 	platformVersion, _ := semver.Make(r.PlatformVersion)
 	if desiredVersion.Major > platformVersion.Major || desiredVersion.Minor > platformVersion.Minor {
 		r.log.Info("backing off from updating subscription as operator version can become ahead of platform version")
-	} else if desiredVersion.Major == channelVersion.Minor && desiredVersion.Minor == channelVersion.Minor+1 {
-		// initiate auto upgrade by patching the channel name of the subscription
-		subscription := &opv1a1.Subscription{}
-		subscription.Name = ocsClientOperatorSubscription.Name
-		subscription.Namespace = ocsClientOperatorSubscription.Namespace
-		subscription.Spec.Channel = getChannelFromVersion(desiredVersion)
-		jsonPatch, _ := json.Marshal(subscription)
-		if err = r.patch(subscription, client.RawPatch(types.MergePatchType, jsonPatch)); err != nil {
+	} else if desiredVersion.Major == channelVersion.Major && desiredVersion.Minor == channelVersion.Minor+1 {
+		// initiate auto upgrade by patching the channel name of the ocsClientOperatorSubscription
+		patchInfo := []struct {
+			Op    string `json:"op"`
+			Path  string `json:"path"`
+			Value string `json:"value"`
+		}{
+			{
+				Op:    "replace",
+				Path:  "/spec/channel",
+				Value: getChannelFromVersion(desiredVersion),
+			},
+		}
+		jsonPatch, _ := json.Marshal(patchInfo)
+		if err = r.patch(ocsClientOperatorSubscription, client.RawPatch(types.JSONPatchType, jsonPatch)); err != nil {
 			return fmt.Errorf("failed to update subscription %q/%q channel name to %q. %v",
-				subscription.Namespace, subscription.Name, subscription.Spec.Channel, err)
+				ocsClientOperatorSubscription.Namespace, ocsClientOperatorSubscription.Name, ocsClientOperatorSubscription.Spec.Channel, err)
 		}
 		r.log.Info("updated subscription channel name",
-			"namespace", subscription.Namespace, "name", subscription.Name,
-			"from", ocsClientOperatorSubscription.Spec.Channel, "to", subscription.Spec.Channel)
+			"namespace", ocsClientOperatorSubscription.Namespace, "name", ocsClientOperatorSubscription.Name,
+			"to", ocsClientOperatorSubscription.Spec.Channel)
 	}
 
-	// decide whether to surface we are upgradeable or not
+	// decide whether to surface we are upgradeable or not, subscription should not be ahead of both desiredVersion and platformVersion
 	if desiredVersion.Major < channelVersion.Major || desiredVersion.Minor < channelVersion.Minor {
 		// someone manually might have initiated an upgrade, best effort to stop it via conditions
-		return fmt.Errorf("subscription channel name is changed outside of operator")
+		return fmt.Errorf("subscription channel name is changed outside of operator  (subscription is ahead of desiredVersion)")
 	}
 
+	if platformVersion.Major < channelVersion.Major || platformVersion.Minor < channelVersion.Minor {
+		return fmt.Errorf("subscription channel name is changed outside of operator (subscription is ahead of platform)")
+	}
 	// TODO (lgangava): as of now there's no way to distingush desiredVersion vs stale desiredVersion
+	// 	and we aren't checking dependents for updating operatorcondition
 
 	return nil
 }
@@ -246,10 +244,12 @@ func getOldestVersion(versions []string) (semver.Version, error) {
 	}
 
 	semverVersions := make([]semver.Version, len(versions))
+	var err error
 	for i := range versions {
-		// these versions are operator set which are queried from values set during build time
-		// and so discarding the error
-		semverVersions[i], _ = semver.Make(versions[i])
+		semverVersions[i], err = semver.Make(versions[i])
+		if err != nil {
+			return semver.Version{}, err
+		}
 	}
 
 	semver.Sort(semverVersions)
@@ -264,5 +264,7 @@ func getChannelFromVersion(version semver.Version) string {
 // returns the semver version of operator version corresponding to the subscription channel name
 func getVersionFromChannel(name string) (semver.Version, error) {
 	version, _ := strings.CutPrefix(name, subscriptionChannelNamePrefix)
+	// usually channel names will not have patch version and semver will fail w/o patch version
+	version += dummyPatchVersion
 	return semver.Make(version)
 }
