@@ -102,24 +102,19 @@ func main() {
 	status := providerclient.NewStorageClientStatus().
 		SetPlatformVersion(platformVersion).
 		SetOperatorVersion(storageClient.Status.Operator.CurrentVersion)
-	if _, err := providerClient.ReportStatus(ctx, storageClient.Status.ConsumerID, status); err != nil {
+	statusResponse, err := providerClient.ReportStatus(ctx, storageClient.Status.ConsumerID, status)
+	if err != nil {
 		klog.Exitf("Failed to report status of storageClient %v: %v", storageClient.Status.ConsumerID, err)
-	}
-
-	// TODO (lgangava): this will be the response of ReportStatus and when the proto is updated this line will be removed
-	desiredVersion := os.Getenv("Version")
-	if desiredVersion == "" {
-		desiredVersion = storageClient.Status.Operator.CurrentVersion
 	}
 
 	storageClient.Status = v1alpha1.StorageClientStatus{
 		Operator: v1alpha1.OperatorVersion{
-			DesiredVersion: desiredVersion,
+			DesiredVersion: statusResponse.ClientDesiredVersion,
 		},
 	}
 	jsonPatch, _ := json.Marshal(storageClient)
 	if err = cl.Status().Patch(ctx, storageClient, client.RawPatch(types.MergePatchType, jsonPatch)); err != nil {
-		klog.Warningf("Failed to patch storageclient %q desired operator version: %v", storageClient.Name, desiredVersion)
+		klog.Warningf("Failed to patch storageclient %q desired operator version: %v", storageClient.Name, statusResponse.ClientDesiredVersion)
 	}
 
 	var csiClusterConfigEntry = new(csi.ClusterConfigEntry)
