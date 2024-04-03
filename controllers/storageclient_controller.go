@@ -30,6 +30,7 @@ import (
 	"github.com/red-hat-storage/ocs-client-operator/pkg/utils"
 
 	configv1 "github.com/openshift/api/config/v1"
+	ocpv1 "github.com/openshift/api/template/v1"
 	opv1a1 "github.com/operator-framework/api/pkg/operators/v1alpha1"
 	providerClient "github.com/red-hat-storage/ocs-operator/v4/services/provider/client"
 	"google.golang.org/grpc/codes"
@@ -127,6 +128,7 @@ func (s *StorageClientReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	return ctrl.NewControllerManagedBy(mgr).
 		For(&v1alpha1.StorageClient{}).
 		Watches(&v1alpha1.StorageClaim{}, enqueueStorageClientRequest).
+		Watches(&ocpv1.Template{}, enqueueStorageClientRequest).
 		Complete(s)
 }
 
